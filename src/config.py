@@ -10,3 +10,7 @@ TRADING_DAYS = 252
 
 # starting value for rf, can change to 3 yr t-bill once implemented
 RISK_FREE_RATE = 0.0
+
+VAR_CONFIDENCE = 0.95
+MC_SIMULATIONS = 10000
+MC_DF = 5  # for student t-distribution, lower = fatter tails
