@@ -6,7 +6,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from src import config, metrics, risk
+from src import config, metrics, risk, optimize
 from src.data import compute_returns, load_prices, portfolio_returns
 
 st.set_page_config(page_title="Portfolio Risk Dashboard", layout="wide")
@@ -264,7 +264,7 @@ fig_corr = px.imshow(
 fig_corr.update_layout(margin=dict(l=0, r=0, t=10, b=0))
 st.plotly_chart(fig_corr, width='stretch')
 st.caption(
-    "Correlations < 0.5 -> diversification benefit. > 0.7 -> concentration risk. Negative correlations = natural hedges. "
+    "Correlations < 0.5 = diversification benefit. > 0.7 = concentration risk. Negative correlations = natural hedges. "
     "High correlation across holdings reduces diversification and increases systematic drawdown risk."
 )
 
@@ -293,6 +293,132 @@ st.dataframe(
     ),
     width='stretch',
 )
+
+
+# portfolio optimization
+st.subheader("Portfolio Optimization")
+
+if len(asset_cols) < 2:
+    st.info("Optimization needs at least two assets with data.")
+else:
+    use_shrinkage = st.checkbox(
+        "Use Ledoit-Wolf covariance shrinkage",
+        value=True,
+        help="Shrinks the noisy sample covariance toward a structured target, "
+        "which stabilizes the optimizer. Raw sample covariance is unstable with "
+        "limited history and tends to produce extreme weights.",
+    )
+
+    mu, cov = optimize.annualized_moments(
+        asset_returns, periods=config.TRADING_DAYS, shrink=use_shrinkage
+    )
+
+    # normalize weights
+    cur_w = np.asarray(aligned_weights, dtype=float)
+    cur_w = cur_w / cur_w.sum()
+
+    ms_w = optimize.max_sharpe(mu, cov, risk_free)
+    mv_w = optimize.min_variance(mu, cov)
+    front_vols, front_rets, _ = optimize.efficient_frontier(
+        mu, cov, n_points=config.FRONTIER_POINTS
+    )
+
+    cur_ret, cur_vol, cur_sharpe = optimize.portfolio_performance(cur_w, mu, cov, risk_free)
+    ms_ret, ms_vol, ms_sharpe = optimize.portfolio_performance(ms_w, mu, cov, risk_free)
+    mv_ret, mv_vol, mv_sharpe = optimize.portfolio_performance(mv_w, mu, cov, risk_free)
+
+    # efficient frontier plot
+    fig_ef = go.Figure()
+    fig_ef.add_trace(go.Scatter(
+        x=front_vols, y=front_rets, mode="lines", name="Efficient frontier",
+        line=dict(color="#1f77b4"),
+        hovertemplate="Vol %{x:.1%}<br>Return %{y:.1%}<extra></extra>",
+    ))
+
+    # capital market line = risk-free rate through the tangency portfolio
+    if ms_vol > 0:
+        x_max = max(front_vols.max() if front_vols.size else cur_vol, cur_vol) * 1.05
+        cml_x = np.array([0.0, x_max])
+        cml_y = risk_free + (ms_ret - risk_free) / ms_vol * cml_x
+        fig_ef.add_trace(go.Scatter(
+            x=cml_x, y=cml_y, mode="lines", name="Capital market line",
+            line=dict(color="#2ca02c", dash="dot", width=1), hoverinfo="skip",
+        ))
+
+    # individual assets
+    asset_vols = np.sqrt(np.diag(cov))
+    fig_ef.add_trace(go.Scatter(
+        x=asset_vols, y=mu, mode="markers+text", name="Assets",
+        text=asset_cols, textposition="top center",
+        marker=dict(color="#aaaaaa", size=8),
+        hovertemplate="%{text}<br>Vol %{x:.1%}<br>Return %{y:.1%}<extra></extra>",
+    ))
+
+    # key portfolios
+    fig_ef.add_trace(go.Scatter(
+        x=[cur_vol], y=[cur_ret], mode="markers", name="Current",
+        marker=dict(color="#d62728", size=13),
+        hovertemplate="Current<br>Vol %{x:.1%}<br>Return %{y:.1%}<extra></extra>",
+    ))
+    fig_ef.add_trace(go.Scatter(
+        x=[ms_vol], y=[ms_ret], mode="markers", name="Max Sharpe",
+        marker=dict(color="#2ca02c", size=16, symbol="star"),
+        hovertemplate="Max Sharpe<br>Vol %{x:.1%}<br>Return %{y:.1%}<extra></extra>",
+    ))
+    fig_ef.add_trace(go.Scatter(
+        x=[mv_vol], y=[mv_ret], mode="markers", name="Min Variance",
+        marker=dict(color="#ff7f0e", size=13, symbol="diamond"),
+        hovertemplate="Min Variance<br>Vol %{x:.1%}<br>Return %{y:.1%}<extra></extra>",
+    ))
+    fig_ef.update_layout(
+        xaxis_title="Annualized volatility",
+        yaxis_title="Annualized return",
+        xaxis_tickformat=".0%",
+        yaxis_tickformat=".0%",
+        hovermode="closest",
+        legend=dict(orientation="h"),
+        margin=dict(l=0, r=0, t=10, b=0),
+    )
+    st.plotly_chart(fig_ef, width='stretch')
+
+    st.caption(
+        "**Efficient frontier**: best achievable return for each level of "
+        "volatility. **Max Sharpe** (tangency): portfolio with best risk-adjusted "
+        "return. **Min Variance**:lowest-risk portfolio. If current sits below the "
+        "frontier, the same return was reachable at lower risk."
+    )
+
+    # weights comparison
+    weights_df = pd.DataFrame(
+        {"Current": cur_w, "Max Sharpe": ms_w, "Min Variance": mv_w},
+        index=asset_cols,
+    )
+    st.markdown("**Weights**")
+    st.dataframe(weights_df.style.format("{:.1%}"), width='stretch')
+
+    # performance comparison
+    perf_df = pd.DataFrame(
+        {
+            "Return": [cur_ret, ms_ret, mv_ret],
+            "Volatility": [cur_vol, ms_vol, mv_vol],
+            "Sharpe": [cur_sharpe, ms_sharpe, mv_sharpe],
+        },
+        index=["Current", "Max Sharpe", "Min Variance"],
+    )
+    st.markdown("**Expected performance**")
+    st.dataframe(
+        perf_df.style.format(
+            {"Return": "{:.2%}", "Volatility": "{:.2%}", "Sharpe": "{:.2f}"}
+        ),
+        width='stretch',
+    )
+
+    st.caption(
+        "Returns and covariance are annualized from the selected window "
+        "(arithmetic annualization). These weights are optimized **in-sample**, "
+        "so they reflect what would have been optimal over this history, not a "
+        "forecast."
+    )
 
 
 # rule-based risk read

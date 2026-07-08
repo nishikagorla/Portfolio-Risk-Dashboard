@@ -35,14 +35,16 @@ portfolio-risk-dashboard/
 │   ├── config.py       # defaults & constants
 │   ├── data.py         # price download, returns, portfolio aggregation
 │   ├── metrics.py      # performance & risk metric functions
-│   └── risk.py         # Value at Risk and Expected Shortfall
+│   ├── risk.py         # VaR, Expected Shortfall, and the rule-based risk read
+│   └── optimize.py     # mean-variance optimization and the efficient frontier
 ├── tests/
-│   ├── test_metrics.py # unit tests on the performance math
-│   └── test_risk.py    # unit tests on the VaR / ES math
+│   ├── test_metrics.py  # unit tests on the performance math
+│   ├── test_risk.py     # unit tests on the VaR / ES math
+│   └── test_optimize.py # unit tests on the optimization math
 └── requirements.txt
 ```
 
-`data.py`, `metrics.py`, and `risk.py` contain no Streamlit code, so they're testable in isolation and the UI never has business logic.
+`data.py`, `metrics.py`, `risk.py`, and `optimize.py` contain no Streamlit code, so they're testable in isolation and the UI never has business logic.
 
 ## Methodology
 
@@ -72,8 +74,28 @@ non-normal the returns are. Expected Shortfall answers the question VaR ignores 
 |---|---|
 | Historical VaR | Empirical (1 − α) percentile of actual returns; no distributional assumption. |
 | Parametric VaR | Normal assumption: −(μ + zσ), where z = Φ⁻¹(1 − α) ≈ −1.645 at 95%. |
-| Monte Carlo VaR | Simulate scenarios from the assets' mean/covariance (preserving correlations), take the percentile of simulated portfolio P&L. |
+| Monte Carlo VaR | Simulate scenarios from the assets' mean/covariance (preserving correlations) under a normal or Student-t distribution, take the percentile of simulated portfolio P&L. |
 | Expected Shortfall (CVaR) | Average loss on the days that breach VaR; coherent and always ≥ VaR. |
+
+The **risk read** turns these numbers into plain-language flags using fixed
+thresholds (not a model): a fat-tail flag when historical VaR runs well above
+parametric, a severe-tail flag when ES is a large multiple of VaR, and
+concentration and drawdown flags from correlation, position size, and max
+drawdown.
+
+### Portfolio optimization
+
+Mean-variance (Markowitz) optimization on annualized moments, solved with
+`scipy.optimize` (SLSQP). Portfolios are long-only and fully invested. Moments
+use **arithmetic** annualization (mean × 252, covariance × 252), which keeps the
+quadratic form `wᵀΣw` consistent because variance scales linearly with time.
+
+| Output | How it's computed |
+|---|---|
+| Efficient frontier | For a grid of target returns, the minimum-variance portfolio achieving each. |
+| Max Sharpe (tangency) | Weights maximizing (return − risk-free) ÷ volatility. |
+| Min variance | Weights minimizing portfolio variance. |
+| Ledoit-Wolf shrinkage | Optional covariance estimator that shrinks the noisy sample covariance toward a structured target, stabilizing the optimized weights. |
 
 ## Limitations
 
@@ -90,6 +112,12 @@ non-normal the returns are. Expected Shortfall answers the question VaR ignores 
   is representative of the future.
 - One-day VaR scaled to longer horizons assumes returns are independent across
   days; in practice volatility clusters.
+- Mean-variance optimization is **highly sensitive to estimation error** in the
+  inputs; small changes in estimated returns swing the weights. Ledoit-Wolf
+  shrinkage mitigates this but does not remove it.
+- Optimized weights are computed **in-sample** — optimal over the chosen window,
+  not a forecast — and are long-only and fully invested (no shorting, leverage,
+  or cash).
 - Yahoo Finance data can have gaps and survivorship issues; it is not
   production-grade.
 
@@ -98,7 +126,8 @@ non-normal the returns are. Expected Shortfall answers the question VaR ignores 
 - [x] Data pipeline with adjusted-price history and return calculation
 - [x] Performance metrics — annualized return, volatility, Sharpe, max drawdown, beta
 - [x] Correlation heatmap and benchmark-relative performance
-- [x] Value at Risk (historical, parametric, Monte Carlo) and Expected Shortfall
-- [ ] Mean-variance optimization and the efficient frontier (Ledoit-Wolf covariance shrinkage)
+- [x] Value at Risk (historical, parametric, Monte Carlo — normal and Student-t) and Expected Shortfall
+- [x] Rule-based risk read — concentration, tail-severity, and drawdown flags
+- [x] Mean-variance optimization and the efficient frontier (Ledoit-Wolf covariance shrinkage)
 - [ ] Historical stress testing (2008, COVID, etc.) and VaR backtesting (Kupiec POF test)
 - [ ] Deployment to Streamlit Community Cloud

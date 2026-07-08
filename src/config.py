@@ -14,3 +14,5 @@ RISK_FREE_RATE = 0.0
 VAR_CONFIDENCE = 0.95
 MC_SIMULATIONS = 10000
 MC_DF = 5  # for student t-distribution, lower = fatter tails
+
+FRONTIER_POINTS = 50  # number of points traced along the efficient frontier
