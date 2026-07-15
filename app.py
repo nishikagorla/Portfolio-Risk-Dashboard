@@ -6,7 +6,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from src import config, metrics, risk, optimize
+from src import config, metrics, risk, optimize, stress, backtest
 from src.data import compute_returns, load_prices, portfolio_returns
 
 st.set_page_config(page_title="Portfolio Risk Dashboard", layout="wide")
@@ -183,9 +183,9 @@ else:
 
 st.caption(
     f"At {confidence:.0%} confidence, VaR is the daily loss the portfolio is not "
-    f"expected to exceed; on the {(1 - confidence):.0%} of days it is exceeded, "
+    f"expected to exceed. On the {(1 - confidence):.0%} of days it is exceeded, "
     "Expected Shortfall is the average loss. The gap between Historical/Expected "
-    "Shortfall and Parametric is the fat tails the normal assumption misses. "
+    "Shortfall and Parametric reveals the fat tails which the normal assumption misses. "
     + mc_note
 )
 
@@ -235,7 +235,7 @@ for label, value, color in var_lines:
     )
 fig_var.update_layout(
     xaxis_tickformat=".1%",
-    xaxis_title="Daily return",
+    xaxis_title="Daily Return",
     yaxis_title="Frequency",
     hovermode="closest",
     legend=dict(orientation="h"),
@@ -246,8 +246,153 @@ fig_var.update_yaxes(range=[0, y_top])
 st.plotly_chart(fig_var, width='stretch')
 st.caption(
     "If Historical VaR or Expected Shortfall lie further left than Parametric VaR, "
-    "that suggests the return distribution may be negatively skewed with fat tails."
+    "the return distribution may be negatively skewed with fat tails."
 )
+
+
+# stress testing
+st.subheader("Stress Testing")
+
+beta_val = stats.get("Beta vs. Benchmark")
+has_beta = beta_val is not None and not np.isnan(beta_val)
+
+stress_rows = []
+for name, spec in stress.SCENARIOS.items():
+    w_start, w_end = spec["window"]
+    market_shock = spec["market_shock"]
+
+    # historical replay if the selected date range covers the crisis window
+    window_ret = asset_returns.loc[w_start:w_end]
+    if window_ret.shape[0] > 1:
+        hist_ret, hist_dd = stress.replay(window_ret, aligned_weights)
+    else:
+        hist_ret, hist_dd = np.nan, np.nan
+
+    beta_est = stress.beta_shock(beta_val, market_shock) if has_beta else np.nan
+
+    stress_rows.append(
+        {
+            "Scenario": name,
+            "S&P Shock": market_shock,
+            "Beta Estimate": beta_est,
+            "Historical": hist_ret,
+            "Max Drawdown": hist_dd,
+        }
+    )
+
+stress_df = pd.DataFrame(stress_rows).set_index("Scenario")
+st.dataframe(
+    stress_df.style.format(
+        {
+            "S&P Shock": "{:.1%}",
+            "Beta Estimate": "{:.1%}",
+            "Historical": "{:.1%}",
+            "Max Drawdown": "{:.1%}",
+        },
+        na_rep="—",
+    ),
+    width='stretch',
+)
+
+# custom hypothetical shock
+custom_shock_pct = st.slider(
+    "Hypothetical market shock", min_value=-50, max_value=0,
+    value=-20, step=1, format="%d%%",
+)
+custom_shock = custom_shock_pct / 100.0
+if has_beta:
+    st.metric(
+        "Estimated portfolio impact",
+        f"{stress.beta_shock(beta_val, custom_shock):.1%}",
+        help=f"beta {beta_val:.2f} x {custom_shock:.0%} market move",
+    )
+else:
+    st.info("Add a benchmark in the sidebar to enable the beta-scaled estimate.")
+
+st.caption(
+    "**S&P Shock:** peak-to-trough drop in the S&P 500 during that period. "
+    "**Beta Estimate:** a rough guess for crises your holdings predate, scaling the "
+    "market's drop by your beta. **Historical:** actual loss during a past crisis "
+    "(shown only if your start date covers it). "
+    "**Max Drawdown:** worst peak-to-trough loss during the crisis window."
+)
+
+
+# var backtesting
+st.subheader("VaR Backtesting")
+
+bt_c1, bt_c2 = st.columns(2)
+with bt_c1:
+    bt_method = st.selectbox("VaR method to test", ["historical", "parametric"])
+with bt_c2:
+    bt_window = st.slider(
+        "Trailing window (days)", min_value=100, max_value=500,
+        value=config.BACKTEST_WINDOW, step=25,
+    )
+
+bt = backtest.var_backtest(
+    port_returns, alpha=confidence, window=bt_window, method=bt_method
+)
+
+if len(bt) < 30:
+    st.info(
+        "Not enough history for a meaningful backtest at this window. "
+        "Use an earlier start date or a smaller window."
+    )
+else:
+    kp = backtest.kupiec_pof(len(bt), int(bt["breach"].sum()), alpha=confidence)
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Observations", f"{kp['n_obs']:,}")
+    k2.metric(
+        "Breaches", kp["breaches"],
+        help=f"expected about {kp['expected_breaches']:.0f}",
+    )
+    k3.metric(
+        "Breach rate", f"{kp['breach_rate']:.2%}",
+        help=f"expected {kp['expected_rate']:.2%}",
+    )
+    k4.metric("Kupiec p-value", f"{kp['p_value']:.2f}")
+
+    if kp["reject_model"]:
+        st.warning(
+            f"Kupiec test **rejects** this VaR model at 5% (p = {kp['p_value']:.2f}): "
+            "the breach rate differs from expected by more than chance, so the "
+            "model looks mis-calibrated over this history."
+        )
+    else:
+        st.success(
+            f"Kupiec test does **not** reject the model (p = {kp['p_value']:.2f}): "
+            "the breach rate is statistically consistent with a well-calibrated "
+            f"{confidence:.0%} VaR."
+        )
+
+    fig_bt = go.Figure()
+    fig_bt.add_trace(go.Scatter(
+        x=bt.index, y=-bt["var"], mode="lines",
+        name=f"-VaR ({confidence:.0%})", line=dict(color="#1f77b4"),
+        hovertemplate="%{x|%Y-%m-%d}<br>VaR %{y:.2%}<extra></extra>",
+    ))
+    breaches = bt[bt["breach"]]
+    fig_bt.add_trace(go.Scatter(
+        x=breaches.index, y=breaches["ret"], mode="markers",
+        name="Breaches", marker=dict(color="#d62728", size=6, symbol="x"),
+        hovertemplate="%{x|%Y-%m-%d}<br>Loss %{y:.2%}<extra></extra>",
+    ))
+    fig_bt.update_layout(
+        yaxis_tickformat=".1%",
+        yaxis_title="Daily Return",
+        hovermode="closest",
+        legend=dict(orientation="h"),
+        margin=dict(l=0, r=0, t=10, b=0),
+    )
+    st.plotly_chart(fig_bt, width='stretch')
+
+    st.caption(
+        "Red points are days where the loss was worse than the VaR prediction. A 95 % VaR "
+        "should be breached about 5% of days and the Kupiec test verifies whether the observed "
+        "breach rate matches."
+    )
 
 
 # correlation heatmap
@@ -313,7 +458,7 @@ else:
         asset_returns, periods=config.TRADING_DAYS, shrink=use_shrinkage
     )
 
-    # normalize weights
+    # normalize current weights
     cur_w = np.asarray(aligned_weights, dtype=float)
     cur_w = cur_w / cur_w.sum()
 
@@ -371,8 +516,8 @@ else:
         hovertemplate="Min Variance<br>Vol %{x:.1%}<br>Return %{y:.1%}<extra></extra>",
     ))
     fig_ef.update_layout(
-        xaxis_title="Annualized volatility",
-        yaxis_title="Annualized return",
+        xaxis_title="Annualized Volatility",
+        yaxis_title="Annualized Return",
         xaxis_tickformat=".0%",
         yaxis_tickformat=".0%",
         hovermode="closest",
@@ -383,9 +528,9 @@ else:
 
     st.caption(
         "**Efficient frontier**: best achievable return for each level of "
-        "volatility. **Max Sharpe** (tangency): portfolio with best risk-adjusted "
-        "return. **Min Variance**:lowest-risk portfolio. If current sits below the "
-        "frontier, the same return was reachable at lower risk."
+        "volatility. **Max Sharpe**: portfolio with the best risk-adjusted"
+        "return. **Min Variance**: portfolio with the lowest-risk. If **Current** "
+        "sits below the frontier, the same return was reachable at lower risk."
     )
 
     # weights comparison
@@ -414,10 +559,11 @@ else:
     )
 
     st.caption(
-        "Returns and covariance are annualized from the selected window "
-        "(arithmetic annualization). These weights are optimized **in-sample**, "
-        "so they reflect what would have been optimal over this history, not a "
-        "forecast."
+        "Returns and covariance are annualized arithmetically from the selected "
+        "window. These weights are optimized **in-sample**, so they reflect what would "
+        "have been optimal over this history, not a forecast. Mean-variance is sensitive "
+        "to estimation error, which the shrinkage option mitigiates but does not remove."
+        
     )
 
 

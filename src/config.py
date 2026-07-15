@@ -16,3 +16,5 @@ MC_SIMULATIONS = 10000
 MC_DF = 5  # for student t-distribution, lower = fatter tails
 
 FRONTIER_POINTS = 50  # number of points traced along the efficient frontier
+
+BACKTEST_WINDOW = 250  # trailing days used to estimate VaR when walking forward

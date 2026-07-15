@@ -6,7 +6,7 @@ import pandas as pd
 from .config import TRADING_DAYS
 
 
-def annualized_return(returns, periods):
+def annualized_return(returns, periods=TRADING_DAYS):
     n = returns.shape[0]
     if n == 0:
         return np.nan
@@ -15,13 +15,13 @@ def annualized_return(returns, periods):
     return cagr
 
 
-def annualized_volatility(returns, periods):
+def annualized_volatility(returns, periods=TRADING_DAYS):
     daily_vol = returns.std(ddof=1)
     annualized_vol = daily_vol * np.sqrt(periods)
     return annualized_vol
 
 
-def sharpe_ratio(returns, risk_free, periods):
+def sharpe_ratio(returns, risk_free=0.0, periods=TRADING_DAYS):
     vol = annualized_volatility(returns, periods)
     if vol == 0 or np.isnan(vol):
         return np.nan
