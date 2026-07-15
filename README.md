@@ -1,13 +1,13 @@
 # Portfolio Risk Dashboard
 
-An interactive Streamlit dashboard for measuring, decomposing, and stress-testing
-the risk of an equity portfolio. Enter holdings and weights, and it reports how
-much risk the portfolio carries, where it comes from, and how it behaves under
-historical market shocks. Each model's assumptions are stated explicitly, so you
-can judge when the estimates are appropriate.
+An interactive dashboard for measuring, decomposing, and stress-testing the risk
+of an equity portfolio. Give it holdings and weights, and it reports how much
+risk the portfolio carries, where it comes from, and how it behaves under
+historical shocks. Each model states its assumptions explicitly, so you can
+judge when its estimates apply.
 
-Built in clean, testable layers: a data pipeline, a library of pure unit-tested
-risk/performance functions, and a thin Streamlit UI with no business logic.
+Built in clean, testable layers: a data pipeline for price history, a library of
+pure, unit-tested risk and performance functions, and a thin Streamlit UI on top.
 
 ## Quick start
 ```bash
@@ -15,71 +15,95 @@ python -m venv .venv
 source .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py         # opens http://localhost:8501
-pytest                       # run the test suite
+pytest                       # run the tests
 ```
 
 Enter your portfolio in the sidebar (tickers, weights, benchmark, start date).
 
 ## Project structure
 ```
-├── app.py               # Streamlit UI + layout
+portfolio-risk-dashboard/
+├── app.py              # Streamlit UI + layout
 ├── src/
-│   ├── config.py        # defaults & constants
-│   ├── data.py          # price download, returns, portfolio aggregation
-│   ├── metrics.py       # performance & risk metrics (return, vol, Sharpe, drawdown, beta)
-│   ├── risk.py          # VaR, Expected Shortfall, rule-based risk read
-│   ├── optimize.py      # mean-variance optimization & efficient frontier
-│   ├── stress.py        # historical stress scenarios & beta-scaled shocks
-│   └── backtest.py      # rolling VaR backtest + Kupiec POF test
-└── tests/               # unit tests for each src module
+│   ├── config.py       # defaults & constants
+│   ├── data.py         # price download, returns, portfolio aggregation
+│   ├── metrics.py      # performance & risk metrics
+│   ├── risk.py         # VaR, Expected Shortfall, rule-based risk read
+│   ├── optimize.py     # mean-variance optimization & efficient frontier
+│   ├── stress.py       # historical stress scenarios
+│   └── backtest.py     # VaR backtesting (Kupiec POF test)
+├── tests/              # unit tests on the math (no Streamlit)
+└── requirements.txt
 ```
 
-`src/` contains no Streamlit code, so the risk math is testable in isolation.
+The `src/` modules contain no Streamlit code, so they're testable in isolation
+and the UI holds no business logic.
 
 ## Methodology
 
-Prices are adjusted closes from Yahoo Finance (splits/dividends already
-reflected). Returns are daily **simple** returns, since a portfolio's simple
-return is the weighted sum of its holdings'.
+Prices are Yahoo Finance adjusted closes (splits and dividends reflected).
+Returns are daily **simple** returns, so a portfolio's return is the weighted sum
+of its holdings'.
 
-**Performance** — annualized return (geometric, `252/n`), annualized volatility
-(daily std × √252), Sharpe, max drawdown, and beta (cov/var vs. benchmark).
+### Performance metrics
 
-**Value at Risk** — the loss not expected to be exceeded on a given day, at
-confidence α. Three estimates of the same lower tail; their disagreement reveals
-how non-normal the returns are:
+| Metric | Definition |
+|---|---|
+| Annualized return | Geometric: compound daily returns, raise to `252/n`. |
+| Annualized volatility | Daily std × √252. |
+| Sharpe ratio | (Annualized return − risk-free) ÷ annualized volatility. |
+| Max drawdown | Largest peak-to-trough drop of the cumulative wealth curve. |
+| Beta | cov(portfolio, benchmark) ÷ var(benchmark). |
+
+### Value at Risk
+
+VaR at confidence α is the loss the portfolio is not expected to exceed on a
+given day. The three methods estimate the same lower tail; their disagreement
+reveals how non-normal the returns are. Expected Shortfall answers what VaR
+ignores — *how bad it is when you breach VaR.*
 
 | Method | How it's estimated |
 |---|---|
-| Historical | Empirical (1 − α) percentile of actual returns; no distributional assumption. |
-| Parametric | Normal: −(μ + zσ), z = Φ⁻¹(1 − α) ≈ −1.645 at 95%. |
-| Monte Carlo | Simulate from the assets' mean/covariance (correlations preserved) under Normal or Student-t; take the percentile of simulated P&L. |
+| Historical VaR | Empirical (1 − α) percentile of actual returns; no distributional assumption. |
+| Parametric VaR | Normal: −(μ + zσ), z = Φ⁻¹(1 − α) ≈ −1.645 at 95%. |
+| Monte Carlo VaR | Simulate from the assets' mean/covariance (correlations preserved) under normal or Student-t; take the percentile of simulated P&L. |
 | Expected Shortfall (CVaR) | Average loss on days that breach VaR; coherent and always ≥ VaR. |
 
-The **risk read** turns these into plain-language flags via fixed thresholds (not
-a model): fat-tail, severe-tail, concentration, and drawdown warnings.
+The **risk read** turns these into plain-language flags using fixed thresholds
+(not a model): fat-tail, severe-tail, concentration, and drawdown flags derived
+from the VaR spread, ES multiple, correlation, position size, and max drawdown.
 
-**Stress testing** — replays the portfolio through historical crisis windows
-(2008, COVID, 2022, 2018 Q4) when the date range covers them, plus a
-single-factor beta-scaled estimate for any market shock.
+### Portfolio optimization
 
-**VaR backtesting** — rolls a trailing window forward, counts breaches, and runs
-the **Kupiec POF test** (χ² likelihood ratio) to check whether the observed
-breach rate is consistent with a well-calibrated VaR.
+Mean-variance (Markowitz) optimization on annualized moments, solved with
+`scipy.optimize` (SLSQP). Portfolios are long-only and fully invested. Moments
+use **arithmetic** annualization (mean × 252, covariance × 252), keeping `wᵀΣw`
+consistent since variance scales linearly with time.
 
-**Optimization** — mean-variance (Markowitz) on arithmetically annualized moments
-(mean × 252, cov × 252), solved with SLSQP; long-only, fully invested. Traces the
-efficient frontier and finds the max-Sharpe (tangency) and min-variance
-portfolios. Optional Ledoit-Wolf covariance shrinkage stabilizes the weights.
+| Output | How it's computed |
+|---|---|
+| Efficient frontier | Minimum-variance portfolio for each of a grid of target returns. |
+| Max Sharpe (tangency) | Weights maximizing (return − risk-free) ÷ volatility. |
+| Min variance | Weights minimizing portfolio variance. |
+| Ledoit-Wolf shrinkage | Optional estimator shrinking noisy sample covariance toward a structured target, stabilizing weights. |
 
 ## Limitations
 
-- Daily simple returns ignore intraday risk, transaction costs, taxes, slippage.
-- Sharpe, beta, volatility are backward-looking over the chosen window and not
-  stable across regimes; beta assumes a linear fit to a single benchmark.
-- Parametric VaR assumes normality and **understates tail risk**; all VaR/ES
-  estimates depend on the chosen window being representative.
-- Mean-variance optimization is **highly sensitive to estimation error**;
-  Ledoit-Wolf shrinkage mitigates but doesn't remove it. Weights are computed
-  **in-sample** — optimal over the window, not a forecast.
-- Yahoo Finance data has gaps and survivorship issues; not production-grade.
+- Daily simple returns ignore intraday risk, transaction costs, taxes, and slippage.
+- Sharpe, beta, and volatility are **backward-looking** over the chosen window and unstable across regimes.
+- Beta assumes a linear relationship to a single benchmark.
+- Parametric VaR assumes normal returns and **understates tail risk**.
+- All VaR/ES estimates assume the historical window represents the future; scaling one-day VaR to longer horizons assumes returns are independent across days.
+- Mean-variance optimization is **highly sensitive to estimation error**; Ledoit-Wolf shrinkage mitigates but doesn't remove this. Weights are **in-sample**, long-only, and fully invested.
+- Yahoo Finance data can have gaps and survivorship issues; it is not production-grade.
+
+## Features
+
+- [x] Data pipeline with adjusted-price history and return calculation
+- [x] Performance metrics — annualized return, volatility, Sharpe, max drawdown, beta
+- [x] Correlation heatmap and benchmark-relative performance
+- [x] Value at Risk (historical, parametric, Monte Carlo — normal and Student-t) and Expected Shortfall
+- [x] Rule-based risk read — concentration, tail-severity, and drawdown flags
+- [x] Mean-variance optimization and the efficient frontier (Ledoit-Wolf covariance shrinkage)
+- [x] Historical stress testing (2008, COVID, etc.) and VaR backtesting (Kupiec POF test)
+- [ ] Deployment to Streamlit Community Cloud
